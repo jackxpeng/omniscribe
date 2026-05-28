@@ -172,3 +172,44 @@ flowchart TD
 1. **Never block the event loop:** Calling synchronous blocking methods (e.g., standard `time.sleep()`, synchronous `requests.get()`, or synchronous SQL queries) freezes the loop. No other task can execute.
 2. **Always await I/O operations:** By using `await`, a task explicitly signals: *"I am waiting on a socket; suspend my execution and run other tasks on this thread."*
 3. **CPU-bound work remains single-threaded:** In Python, the GIL restricts bytecode execution to one thread. However, because LLM inference and PostgreSQL lookups are network/socket operations (I/O-bound), the GIL is released during awaits, achieving massive concurrent performance.
+
+---
+
+## 6. Test-Driven Development (TDD) for Probabilistic Outputs
+
+In deterministic software, a unit test asserts `actual == expected`. However, large language model outputs are **probabilistic** (non-deterministic). To apply TDD to LLM outputs, we employ a multi-layered evaluation framework that measures:
+1. **Quality:** Captured through semantic checks and **"LLM-as-a-judge"** assertions.
+2. **Structure:** Ensuring output matches syntax requirements (e.g., JSON schema).
+3. **Performance (Latency & Cost):** Validating response times and token overhead.
+
+### LLM-as-a-Judge Architecture & Sequence (promptfoo)
+
+The following diagram illustrates how the `promptfoo` testing suite runs evaluations against our target model (`gemini-2.5-flash`) and grades results using a secondary "judge" model:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Suite as Promptfoo Test Runner
+    participant Model as Gemini 2.5 Flash (Target LLM)
+    participant Judge as Gemini 2.5 Flash (LLM Judge)
+
+    Suite->>Model: 1. Send Prompt & Variables (Context, Query)
+    Model-->>Suite: 2. Return Probabilistic Output (Raw JSON string)
+    
+    par Structural Check
+        Suite->>Suite: 3. Verify is-json (Pass/Fail)
+    and Performance Checks
+        Suite->>Suite: 4. Verify Latency <= 12,000ms
+        Suite->>Suite: 5. Verify Token Usage
+    and Semantic Quality Check (LLM-as-a-judge)
+        Suite->>Judge: 6. Send Rubric Criteria & Model Output
+        Note over Judge: Grades output based on semantic rubric
+        Judge-->>Suite: 7. Return Evaluation Verdict (Pass/Fail + Reasoning)
+    end
+    Suite->>Suite: 8. Consolidate Metrics & Log to local View Server
+```
+
+### Key Technical Takeaways for Probabilistic TDD:
+* **The LLM Grader Rubric:** Model-graded assertions (like `llm-rubric`) provide semantic checks that deterministic regexes cannot catch. For instance, asserting that the assignee and task fields match meeting turns semantically, regardless of word choices.
+* **Early Observability:** Storing evaluation runs locally allows you to open `promptfoo view` (`http://localhost:15500`) to visually inspect prompt runs, trace exact token counts, and review step-by-step judge reasoning to debug why a model failed a test.
+
