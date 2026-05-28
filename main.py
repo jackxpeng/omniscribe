@@ -1,5 +1,9 @@
 import json
+from fastapi.staticfiles import StaticFiles
+import httpx
+import asyncio
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import psycopg2
@@ -13,12 +17,11 @@ app = FastAPI(title="OmniScribe Process Manager")
 # 1. Initialize the Local Embedding Client (Pointing to Nomic on Port 11435)
 embedding_client = OpenAI(
     base_url="http://localhost:11435/v1",
-    api_key="sk-no-key-required" # Local servers don't need real keys
+    api_key="sk-no-key-required",  # Local servers don't need real keys
 )
 
 reasoning_client = OpenAI(
-    base_url="http://localhost:11434/v1",
-    api_key="sk-no-key-required"
+    base_url="http://localhost:11434/v1", api_key="sk-no-key-required"
 )
 
 # Initialize the schema
@@ -63,7 +66,7 @@ def get_embedding(text: str) -> list[float]:
 
 
 @app.post("/ingest")
-async def ingest_transcript(payload: TranscriptPayload):
+def ingest_transcript(payload: TranscriptPayload):
     try:
         # Step 1: Semantic Chunking
         turns = parse_transcript_to_turns(payload.transcript)
@@ -95,29 +98,37 @@ async def ingest_transcript(payload: TranscriptPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 class ExtractionQuery(BaseModel):
     query: str
     limit: int = 3
-    
+
+
 @app.post("/extract_actions")
-async def extract_action_items(payload: ExtractionQuery):
+def extract_action_items(payload: ExtractionQuery):
     try:
         # Step 1: Embed the search query using Nomic
         query_vector = get_embedding(payload.query)
-        
+
         # Step 2: Retrieve the closest context from PostgreSQL
         # The <=> operator calculates Cosine Distance in pgvector
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT topic, content 
                 FROM meeting_memory 
                 ORDER BY embedding <=> %s::vector 
                 LIMIT %s
-            """, (query_vector, payload.limit))
+            """,
+                (query_vector, payload.limit),
+            )
             results = cur.fetchall()
-            
+
         if not results:
-            return {"status": "empty", "message": "No relevant context found in memory."}
+            return {
+                "status": "empty",
+                "message": "No relevant context found in memory.",
+            }
 
         # Format the retrieved context into a single string for Gemma
         context_string = "\n\n".join([f"[{row[0]}]\n{row[1]}" for row in results])
@@ -135,15 +146,18 @@ async def extract_action_items(payload: ExtractionQuery):
         """
 
         response = reasoning_client.chat.completions.create(
-            model="gemma-4", # Name ignored by llama.cpp
+            model="gemma-4",  # Name ignored by llama.cpp
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Context:\n{context_string}\n\nExtract the action items based on my query: {payload.query}"}
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context_string}\n\nExtract the action items based on my query: {payload.query}",
+                },
             ],
-            temperature=0.1, # Keep it highly deterministic
-            response_format={"type": "json_object"} # Force structured output
+            temperature=0.1,  # Keep it highly deterministic
+            response_format={"type": "json_object"},  # Force structured output
         )
-        
+
         # Parse the raw JSON string returned by Gemma
         raw_output = response.choices[0].message.content.strip()
         extracted_data = json.loads(raw_output)
@@ -152,11 +166,38 @@ async def extract_action_items(payload: ExtractionQuery):
         return {
             "status": "success",
             "context_retrieved": len(results),
-            "action_items": action_items
+            "action_items": action_items,
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def fetch_slot_data():
+    """Background generator that constantly polls llama.cpp and yields the data."""
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                # Ping the local Gemma 4 server
+                response = await client.get("http://localhost:11434/slots")
+                data = response.json()
+
+                # Format the payload for Server-Sent Events (must start with 'data: ')
+                yield f"data: {json.dumps(data)}\n\n"
+
+            except Exception:
+                yield f"data: {json.dumps({'error': 'Engine offline'})}\n\n"
+
+            # Wait 500ms before pushing the next update
+            await asyncio.sleep(0.5)
+
+
+@app.get("/stream_slots")
+async def stream_slots():
+    """The endpoint the frontend connects to via EventSource."""
+    return StreamingResponse(fetch_slot_data(), media_type="text/event-stream")
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
