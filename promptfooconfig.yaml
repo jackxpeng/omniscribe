@@ -7,12 +7,60 @@ prompts:
   - "Extract actions for: {{query}}" 
 
 tests:
-  - vars:
+  - description: "Outbox Publisher Task (Sarah / Rust)"
+    vars:
       query: "Who is writing the outbox publisher and what language are they using?"
     assert:
       - type: javascript
-        # Ensure Sarah is assigned and Rust is mentioned
         value: |
           const tasks = JSON.parse(output);
           const task = tasks[0];
           return task.assignee === 'Sarah' && task.task.includes('Rust');
+
+  - description: "Inbox Consumer Task (Dave / Go)"
+    vars:
+      query: "What task did Dave volunteer for and what programming language is he using?"
+    assert:
+      - type: javascript
+        value: |
+          const tasks = JSON.parse(output);
+          const task = tasks[0];
+          return task.assignee === 'Dave' && task.task.includes('Go') && task.task.includes('consumer');
+
+  - description: "PostgreSQL Indexing Task (Alex / SQL)"
+    vars:
+      query: "Who is taking care of the PostgreSQL indexing migration and what tool/language is used?"
+    assert:
+      - type: javascript
+        value: |
+          const tasks = JSON.parse(output);
+          const task = tasks[0];
+          return task.assignee === 'Alex' && (task.task.includes('indexing') || task.task.includes('SQL'));
+
+  - description: "Monitoring Task (Sarah / Prometheus)"
+    vars:
+      query: "Who is setting up the Prometheus monitoring?"
+    assert:
+      - type: javascript
+        value: |
+          const tasks = JSON.parse(output);
+          const task = tasks[0];
+          return task.assignee === 'Sarah' && task.task.includes('Prometheus');
+
+  - description: "Negative Scaling Task (Not Mentioned)"
+    vars:
+      query: "What task did Alex volunteer for regarding mobile app development?"
+    assert:
+      - type: javascript
+        value: |
+          const tasks = JSON.parse(output);
+          return tasks.length === 0;
+
+  - description: "Negative React Task (Not Mentioned)"
+    vars:
+      query: "Who volunteered to build the React dashboard interface?"
+    assert:
+      - type: javascript
+        value: |
+          const tasks = JSON.parse(output);
+          return tasks.length === 0;

@@ -162,7 +162,7 @@ async def extract_action_items(payload: ExtractionQuery):
         # Step 3: Orchestrate Gemma 4 to extract structured action items
         system_prompt = """
         You are OmniScribe, an autonomous Process Manager for a senior engineering team.
-        Read the provided meeting transcript context and extract any concrete action items.
+        Read the provided meeting transcript context and extract ONLY the concrete action items that are directly relevant to the user's query. Do not extract tasks that are unrelated to the query. If no tasks in the context are relevant to the query, return an empty "action_items" list.
         
         You must respond ONLY with a valid JSON object containing an "action_items" list of tasks. Do not include markdown formatting like ```json.
         Each task object in the list must have three keys:
