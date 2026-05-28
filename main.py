@@ -10,8 +10,12 @@ from openai import AsyncOpenAI
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from pgvector.psycopg import register_vector_async
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 from utils import parse_transcript_to_turns, chunk_by_speaker
 
 db_conninfo = "dbname=postgres user=postgres password=postgres host=localhost port=5432"
@@ -57,14 +61,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="OmniScribe Process Manager", lifespan=lifespan)
 
-# 1. Initialize the Local Embedding Client (Pointing to Nomic on Port 11435)
+# 1. Initialize the Google Gemini OpenAI-compatible client
 embedding_client = AsyncOpenAI(
-    base_url="http://localhost:11435/v1",
-    api_key="sk-no-key-required",  # Local servers don't need real keys
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=GEMINI_API_KEY,
 )
 
 reasoning_client = AsyncOpenAI(
-    base_url="http://localhost:11434/v1", api_key="sk-no-key-required"
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=GEMINI_API_KEY,
 )
 
 
@@ -74,10 +79,10 @@ class TranscriptPayload(BaseModel):
 
 
 async def get_embedding(text: str) -> list[float]:
-    """Calls our local Nomic microservice to convert text to a vector."""
+    """Calls Gemini embeddings API to convert text to a vector."""
     response = await embedding_client.embeddings.create(
         input=text,
-        model="nomic-embed-text",  # Name doesn't matter for llama.cpp, but required by the API schema
+        model="text-embedding-004",
     )
     return response.data[0].embedding
 
@@ -165,7 +170,7 @@ async def extract_action_items(payload: ExtractionQuery):
         """
 
         response = await reasoning_client.chat.completions.create(
-            model="gemma-4",  # Name ignored by llama.cpp
+            model="gemini-2.5-flash",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
