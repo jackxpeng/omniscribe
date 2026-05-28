@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI):
                         embedding VECTOR(768)
                     );
                 """)
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS action_items (
+                        id SERIAL PRIMARY KEY,
+                        assignee VARCHAR(100),
+                        task TEXT,
+                        status VARCHAR(50) DEFAULT 'PENDING'
+                    );
+                """)
             print("Database initialized successfully.")
     except Exception as e:
         print(f"Database initialization failed: {e}")
@@ -174,6 +182,16 @@ async def extract_action_items(payload: ExtractionQuery):
         extracted_data = json.loads(raw_output)
         action_items = extracted_data.get("action_items", [])
 
+        # --- Save to Database ---
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for item in action_items:
+                    await cur.execute(
+                        "INSERT INTO action_items (assignee, task, status) VALUES (%s, %s, %s)",
+                        (item.get("assignee"), item.get("task"), "PENDING")
+                    )
+        # -----------------------------
+
         return {
             "status": "success",
             "context_retrieved": len(results),
@@ -207,6 +225,42 @@ async def fetch_slot_data():
 async def stream_slots():
     """The endpoint the frontend connects to via EventSource."""
     return StreamingResponse(fetch_slot_data(), media_type="text/event-stream")
+
+
+@app.post("/execute_tasks")
+async def execute_pending_tasks():
+    try:
+        # 1. Find all pending tasks
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id, assignee, task FROM action_items WHERE status = 'PENDING'")
+                pending_tasks = await cur.fetchall()
+                
+                if not pending_tasks:
+                    return {"status": "idle", "message": "No pending tasks to execute."}
+
+                executed_log = []
+                
+                # 2. Simulate the AI "Execution" (e.g., calling the Jira API)
+                for task_id, assignee, task in pending_tasks:
+                    # Simulate non-blocking network latency for API calls
+                    await asyncio.sleep(1) 
+                    
+                    action_log = f"Successfully created Jira ticket for {assignee}: '{task}'"
+                    executed_log.append(action_log)
+                    
+                    # 3. Mark as completed in the database
+                    await cur.execute("UPDATE action_items SET status = 'COMPLETED' WHERE id = %s", (task_id,))
+                
+        return {
+            "status": "success",
+            "tasks_completed": len(pending_tasks),
+            "execution_log": executed_log
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 

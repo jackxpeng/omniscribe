@@ -31,6 +31,12 @@
         <pre id="results">No tasks extracted yet.</pre>
     </div>
 
+    <div class="card">
+        <h2>Process Manager Execution</h2>
+        <button id="execBtn" onclick="runExecution()" style="background: #10b981;">Execute Pending Tasks</button>
+        <pre id="execResults">Awaiting command...</pre>
+    </div>
+
     <script>
         async function runExtraction() {
             const btn = document.getElementById('extractBtn');
@@ -84,6 +90,24 @@
                 // Once the POST request finishes, close the SSE connection and reset the UI
                 evtSource.close();
                 document.getElementById('status').innerText = "Complete";
+                btn.disabled = false;
+            }
+        }
+
+        async function runExecution() {
+            const btn = document.getElementById('execBtn');
+            const resultsBox = document.getElementById('execResults');
+            
+            btn.disabled = true;
+            resultsBox.innerText = "Sweeping database and calling external APIs...";
+
+            try {
+                const response = await fetch('/execute_tasks', { method: 'POST' });
+                const result = await response.json();
+                resultsBox.innerText = JSON.stringify(result, null, 2);
+            } catch (error) {
+                resultsBox.innerText = "Error: " + error.message;
+            } finally {
                 btn.disabled = false;
             }
         }
