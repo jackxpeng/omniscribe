@@ -1,3 +1,4 @@
+import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
@@ -15,6 +16,10 @@ embedding_client = OpenAI(
     api_key="sk-no-key-required" # Local servers don't need real keys
 )
 
+reasoning_client = OpenAI(
+    base_url="http://localhost:11434/v1",
+    api_key="sk-no-key-required"
+)
 
 # Initialize the schema
 try:
@@ -90,6 +95,68 @@ async def ingest_transcript(payload: TranscriptPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class ExtractionQuery(BaseModel):
+    query: str
+    limit: int = 3
+    
+@app.post("/extract_actions")
+async def extract_action_items(payload: ExtractionQuery):
+    try:
+        # Step 1: Embed the search query using Nomic
+        query_vector = get_embedding(payload.query)
+        
+        # Step 2: Retrieve the closest context from PostgreSQL
+        # The <=> operator calculates Cosine Distance in pgvector
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT topic, content 
+                FROM meeting_memory 
+                ORDER BY embedding <=> %s::vector 
+                LIMIT %s
+            """, (query_vector, payload.limit))
+            results = cur.fetchall()
+            
+        if not results:
+            return {"status": "empty", "message": "No relevant context found in memory."}
+
+        # Format the retrieved context into a single string for Gemma
+        context_string = "\n\n".join([f"[{row[0]}]\n{row[1]}" for row in results])
+
+        # Step 3: Orchestrate Gemma 4 to extract structured action items
+        system_prompt = """
+        You are OmniScribe, an autonomous Process Manager for a senior engineering team.
+        Read the provided meeting transcript context and extract any concrete action items.
+        
+        You must respond ONLY with a valid JSON object containing an "action_items" list of tasks. Do not include markdown formatting like ```json.
+        Each task object in the list must have three keys:
+        - "assignee": The person tasked with the item.
+        - "task": A clear, concise description of the architecture or engineering task.
+        - "status": Always set this to "PENDING".
+        """
+
+        response = reasoning_client.chat.completions.create(
+            model="gemma-4", # Name ignored by llama.cpp
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Context:\n{context_string}\n\nExtract the action items based on my query: {payload.query}"}
+            ],
+            temperature=0.1, # Keep it highly deterministic
+            response_format={"type": "json_object"} # Force structured output
+        )
+        
+        # Parse the raw JSON string returned by Gemma
+        raw_output = response.choices[0].message.content.strip()
+        extracted_data = json.loads(raw_output)
+        action_items = extracted_data.get("action_items", [])
+
+        return {
+            "status": "success",
+            "context_retrieved": len(results),
+            "action_items": action_items
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
