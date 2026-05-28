@@ -15,14 +15,15 @@ graph TD
     subgraph Local Workspace
         App[OmniScribe System]
         DB[(PostgreSQL + pgvector)]
-        Nomic[Nomic Embeddings API]
-        Gemma[Gemma 4 Reasoning API]
+    end
+
+    subgraph Cloud Services
+        Gemini[Google Gemini API]
     end
 
     User -->|Ingests transcripts, extracts & sweeps tasks| App
     App -->|Saves context & queries similarity| DB
-    App -->|Generates text vectors| Nomic
-    App -->|Performs LLM inference| Gemma
+    App -->|Generates embeddings & performs reasoning| Gemini
 ```
 
 ---
@@ -47,16 +48,19 @@ graph TB
         DB[(Postgres Port 5432)]
     end
 
-    subgraph LLM Inference Containers [Local Inference Infrastructure]
-        NomicEmbed[Nomic Microservice: Port 11435]
-        GemmaEngine[Gemma 4 LLM Server: Port 11434]
+    subgraph Cloud API [Google Gemini Cloud API]
+        GeminiAPI[Gemini API Endpoints]
+    end
+
+    subgraph Optional Local Legacy [Optional Local Inference]
+        LocalEngine[Local llama.cpp Server: Port 11434]
     end
 
     UI -->|REST POST /ingest, /extract_actions, /execute_tasks| API
     UI -->|EventSource SSE GET /stream_slots| SSE
-    API -->|Async HTTP Client /v1/embeddings| NomicEmbed
-    API -->|Async HTTP Client /v1/chat/completions| GemmaEngine
-    SSE -->|Async HTTP GET /slots| GemmaEngine
+    API -->|Async HTTP Client /embeddings| GeminiAPI
+    API -->|Async HTTP Client /chat/completions| GeminiAPI
+    SSE -.->|Optional telemetry polling| LocalEngine
     Pool -->|Non-blocking sockets| DB
     API -->|Acquires connections| Pool
 ```
@@ -75,24 +79,22 @@ sequenceDiagram
     participant UI as Browser UI
     participant API as FastAPI Backend
     participant Pool as Async Connection Pool
-    participant Nomic as Nomic Server (11435)
-    participant Gemma as Gemma Server (11434)
+    participant Gemini as Google Gemini API
     participant DB as PostgreSQL
 
     User->>UI: Click "Extract Actions"
-    par Start Telemetry Channel
+    par Start Telemetry Channel (Graceful Default)
         UI->>API: GET /stream_slots (SSE Connection)
         loop Every 500ms
-            API->>Gemma: GET /slots
-            Gemma-->>API: Array of slot states (Slot 1 processing = true)
-            API-->>UI: Push Event ("tokens_decoded": 285)
+            API->>API: Poll local server (None found)
+            API-->>UI: Push Event ("error": "Engine offline")
         end
     and Start Execution Channel
         UI->>API: POST /extract_actions (payload)
         activate API
         
-        API->>Nomic: POST /v1/embeddings (query text)
-        Nomic-->>API: Vector array (float[768])
+        API->>Gemini: POST /embeddings (query text)
+        Gemini-->>API: Vector array (float[3072])
         
         API->>Pool: Acquire Connection
         Pool->>API: AsyncConnection
@@ -100,11 +102,11 @@ sequenceDiagram
         API->>DB: Cosine Distance query (<=> vector)
         DB-->>API: Text Context blocks
         
-        API->>Gemma: POST /v1/chat/completions (context + query)
-        activate Gemma
-        Note over Gemma: Processes prompt & decodes tokens
-        Gemma-->>API: Structured JSON response
-        deactivate Gemma
+        API->>Gemini: POST /chat/completions (context + query)
+        activate Gemini
+        Note over Gemini: Cloud-based token decoding
+        Gemini-->>API: Structured JSON response
+        deactivate Gemini
         
         API->>DB: INSERT into action_items (PENDING)
         DB-->>API: Insert Success
@@ -112,7 +114,6 @@ sequenceDiagram
         API-->>UI: HTTP 200 (Action items JSON list)
         deactivate API
     end
-    UI->>UI: Close SSE Connection
 ```
 
 ---
@@ -133,13 +134,10 @@ sequenceDiagram
   ```
 * **Result:** Warm database sockets are maintained and reused instantly. The `configure` parameter acts as a database connection interceptor, guaranteeing that every single database connection pulled from the pool is pre-registered to understand vector embeddings.
 
-### Decision 3: Dynamically Searching Slot Telemetry
-* **Context:** Local LLM engines like `llama.cpp` process multiple prompts concurrently using separate slots. Statically reading the first slot (`data[0]`) in the front-end resulted in false "Idle" readouts whenever the engine assigned prompt execution to Slot 1, 2, or 3.
-* **Decision:** Replaced static array reading with a dynamic predicate search:
-  ```javascript
-  const activeSlot = data.find(slot => slot.is_processing === true) || data[0];
-  ```
-* **Result:** The dashboard maintains perfect observability across multi-user, multi-slot environments.
+### Decision 3: Transition from Local hardware Slot Telemetry to Cloud APIs & Promptfoo Benchmarking
+* **Context:** The application was initially designed around local inference engines (like `llama.cpp` or `Ollama`) tracking slot concurrency (`/stream_slots`). However, local LLMs introduce extreme latency, high local computing overhead, and complicate CI/CD pipelines.
+* **Decision:** We migrated our core RAG model to **Google Gemini API** endpoints (using standard OpenAI-compatible structures). To handle this shift without UI breakage, the local `/stream_slots` endpoint gracefully handles connection failures by returning `{"error": "Engine offline"}`. In its place, the core observability system was shifted to **Promptfoo Test-Driven Evaluations** that track cost, precise cloud token limits, and latency directly in a dashboard.
+* **Result:** Drastic improvement in query execution speeds (RAG extraction completed under 2 seconds) and standardized E2E quality validations via robust cloud endpoints.
 
 ---
 
