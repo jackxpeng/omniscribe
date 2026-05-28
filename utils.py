@@ -29,30 +29,37 @@ def parse_transcript_to_turns(transcript_text: str) -> List[Dict[str, str]]:
             
     return turns
 
-def chunk_by_speaker(turns: List[Dict[str, str]], max_chars: int = 1000) -> List[str]:
+def partition_turns_to_parents(turns: List[Dict[str, str]], max_chars: int = 1500) -> List[Dict[str, any]]:
     """
-    Aggregates speaker turns into larger chunks for embedding.
-    Ensures chunks do not exceed max_chars unless a single turn is massive.
+    Groups speaker turns chronologically into parent blocks (up to max_chars),
+    retaining the list of individual child turns that belong to each parent.
+    Returns a list of dictionaries: {"content": str, "turns": list}
     """
-    chunks = []
-    current_chunk_text = ""
-    
+    parent_blocks = []
+    current_parent_turns = []
+    current_content = ""
+
     for turn in turns:
-        # Format the turn back into readable text for the LLM
         turn_text = f"{turn['speaker']}: {turn['text']}\n"
-        
-        # If adding this turn exceeds our limit, save the current chunk and start a new one
-        if len(current_chunk_text) + len(turn_text) > max_chars and current_chunk_text:
-            chunks.append(current_chunk_text.strip())
-            current_chunk_text = turn_text
+        if len(current_content) + len(turn_text) > max_chars and current_content:
+            parent_blocks.append({
+                "content": current_content.strip(),
+                "turns": current_parent_turns
+            })
+            current_content = turn_text
+            current_parent_turns = [turn]
         else:
-            current_chunk_text += turn_text
-            
-    # Catch the final chunk
-    if current_chunk_text:
-        chunks.append(current_chunk_text.strip())
+            current_content += turn_text
+            current_parent_turns.append(turn)
+
+    if current_content:
+        parent_blocks.append({
+            "content": current_content.strip(),
+            "turns": current_parent_turns
+        })
         
-    return chunks
+    return parent_blocks
+
 
 # --- Quick Local Test ---
 if __name__ == "__main__":
@@ -66,7 +73,11 @@ if __name__ == "__main__":
     
     turns = parse_transcript_to_turns(sample_text)
     # Using a tiny max_chars to force it to split for the demonstration
-    chunks = chunk_by_speaker(turns, max_chars=100) 
+    blocks = partition_turns_to_parents(turns, max_chars=100) 
     
-    for i, chunk in enumerate(chunks):
-        print(f"--- Chunk {i+1} ---\n{chunk}\n")
+    for i, block in enumerate(blocks):
+        print(f"--- Parent {i+1} ---\n{block['content']}\n")
+        print("Children:")
+        for turn in block["turns"]:
+            print(f"  - {turn['speaker']}: {turn['text']}")
+        print()

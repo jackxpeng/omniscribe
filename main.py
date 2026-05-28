@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-from utils import parse_transcript_to_turns, chunk_by_speaker
+from utils import parse_transcript_to_turns, partition_turns_to_parents
 
 db_conninfo = "dbname=postgres user=postgres password=postgres host=localhost port=5432"
 
@@ -110,28 +110,7 @@ async def ingest_transcript(payload: TranscriptPayload):
             )
 
         # Group turns into parent blocks (up to 1500 chars), tracking which turns belong to each parent
-        parent_blocks = []
-        current_parent_turns = []
-        current_content = ""
-
-        for turn in turns:
-            turn_text = f"{turn['speaker']}: {turn['text']}\n"
-            if len(current_content) + len(turn_text) > 1500 and current_content:
-                parent_blocks.append({
-                    "content": current_content.strip(),
-                    "turns": current_parent_turns
-                })
-                current_content = turn_text
-                current_parent_turns = [turn]
-            else:
-                current_content += turn_text
-                current_parent_turns.append(turn)
-
-        if current_content:
-            parent_blocks.append({
-                "content": current_content.strip(),
-                "turns": current_parent_turns
-            })
+        parent_blocks = partition_turns_to_parents(turns, max_chars=1500)
 
         # Step 2: Insert parent documents and embed/insert individual child chunks (speaker turns)
         async with app.state.db_pool.connection() as conn:
