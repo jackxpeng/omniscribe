@@ -34,12 +34,22 @@ async def lifespan(app: FastAPI):
         async with app.state.db_pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                # Migrate vector dimensions: drop old 768 table and create 3072 table
-                await cur.execute("DROP TABLE IF EXISTS meeting_memory;")
+                # Migrate to decoupled parent-child tables
+                await cur.execute("DROP TABLE IF EXISTS child_chunks CASCADE;")
+                await cur.execute("DROP TABLE IF EXISTS parent_documents CASCADE;")
+                await cur.execute("DROP TABLE IF EXISTS meeting_memory CASCADE;")
+                
                 await cur.execute("""
-                    CREATE TABLE IF NOT EXISTS meeting_memory (
+                    CREATE TABLE IF NOT EXISTS parent_documents (
                         id SERIAL PRIMARY KEY,
                         topic VARCHAR(255),
+                        content TEXT
+                    );
+                """)
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS child_chunks (
+                        id SERIAL PRIMARY KEY,
+                        parent_id INTEGER REFERENCES parent_documents(id) ON DELETE CASCADE,
                         content TEXT,
                         embedding VECTOR(3072)
                     );
@@ -92,32 +102,62 @@ async def get_embedding(text: str) -> list[float]:
 @app.post("/ingest")
 async def ingest_transcript(payload: TranscriptPayload):
     try:
-        # Step 1: Semantic Chunking
+        # Step 1: Parse and partition transcript into Parent-Child relationships
         turns = parse_transcript_to_turns(payload.transcript)
-        chunks = chunk_by_speaker(turns, max_chars=1500)
-
-        if not chunks:
+        if not turns:
             raise HTTPException(
-                status_code=400, detail="Transcript could not be parsed into chunks."
+                status_code=400, detail="Transcript could not be parsed into speaker turns."
             )
 
-        # Step 2 & 3: Generate Vectors and Insert to DB
+        # Group turns into parent blocks (up to 1500 chars), tracking which turns belong to each parent
+        parent_blocks = []
+        current_parent_turns = []
+        current_content = ""
+
+        for turn in turns:
+            turn_text = f"{turn['speaker']}: {turn['text']}\n"
+            if len(current_content) + len(turn_text) > 1500 and current_content:
+                parent_blocks.append({
+                    "content": current_content.strip(),
+                    "turns": current_parent_turns
+                })
+                current_content = turn_text
+                current_parent_turns = [turn]
+            else:
+                current_content += turn_text
+                current_parent_turns.append(turn)
+
+        if current_content:
+            parent_blocks.append({
+                "content": current_content.strip(),
+                "turns": current_parent_turns
+            })
+
+        # Step 2: Insert parent documents and embed/insert individual child chunks (speaker turns)
         async with app.state.db_pool.connection() as conn:
             async with conn.cursor() as cur:
-                for chunk in chunks:
-                    # Ask Port 11435 for the vector
-                    vector = await get_embedding(chunk)
-
-                    # Save the text and the vector together
+                for block in parent_blocks:
+                    # 2a. Insert parent document and get ID
                     await cur.execute(
-                        "INSERT INTO meeting_memory (topic, content, embedding) VALUES (%s, %s, %s)",
-                        (payload.topic, chunk, vector),
+                        "INSERT INTO parent_documents (topic, content) VALUES (%s, %s) RETURNING id",
+                        (payload.topic, block["content"]),
                     )
+                    parent_id = (await cur.fetchone())[0]
+
+                    # 2b. Insert each speaker turn inside the block as a child chunk
+                    for turn in block["turns"]:
+                        turn_content = f"{turn['speaker']}: {turn['text']}"
+                        vector = await get_embedding(turn_content)
+                        await cur.execute(
+                            "INSERT INTO child_chunks (parent_id, content, embedding) VALUES (%s, %s, %s)",
+                            (parent_id, turn_content, vector),
+                        )
 
         return {
             "status": "success",
-            "chunks_processed": len(chunks),
-            "message": f"Successfully embedded and saved {len(chunks)} chunks to memory.",
+            "parents_processed": len(parent_blocks),
+            "chunks_processed": sum(len(b["turns"]) for b in parent_blocks),
+            "message": f"Successfully processed {len(parent_blocks)} parent documents and embedded child chunks.",
         }
 
     except Exception as e:
@@ -132,32 +172,52 @@ class ExtractionQuery(BaseModel):
 @app.post("/extract_actions")
 async def extract_action_items(payload: ExtractionQuery):
     try:
-        # Step 1: Embed the search query using Nomic
+        # Step 1: Embed the search query using Gemini embeddings
         query_vector = await get_embedding(payload.query)
 
-        # Step 2: Retrieve the closest context from PostgreSQL
-        # The <=> operator calculates Cosine Distance in pgvector
+        # Step 2: Retrieve the closest child chunks from child_chunks table (high precision)
         async with app.state.db_pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT topic, content 
-                    FROM meeting_memory 
+                    SELECT parent_id 
+                    FROM child_chunks 
                     ORDER BY embedding <=> %s::vector 
                     LIMIT %s
                 """,
-                    (query_vector, payload.limit),
+                    (query_vector, max(payload.limit, 5)),  # Get top 5 child chunks to ensure rich context
                 )
-                results = await cur.fetchall()
+                child_results = await cur.fetchall()
 
-        if not results:
-            return {
-                "status": "empty",
-                "message": "No relevant context found in memory.",
-            }
+                if not child_results:
+                    return {
+                        "status": "empty",
+                        "message": "No relevant context found in memory.",
+                    }
 
-        # Format the retrieved context into a single string for Gemma
-        context_string = "\n\n".join([f"[{row[0]}]\n{row[1]}" for row in results])
+                # Step 3: Resolve unique parent IDs (maintaining chronological/relevance order)
+                parent_ids = []
+                for (parent_id,) in child_results:
+                    if parent_id not in parent_ids:
+                        parent_ids.append(parent_id)
+
+                # Step 4: Fetch complete parent documents (substitution/Small-to-Big expansion)
+                await cur.execute(
+                    """
+                    SELECT id, topic, content 
+                    FROM parent_documents 
+                    WHERE id = ANY(%s)
+                """,
+                    (parent_ids,),
+                )
+                parent_results = await cur.fetchall()
+
+                # Step 5: Preserve the original relevance order of parent documents
+                parent_map = {row[0]: (row[1], row[2]) for row in parent_results}
+                ordered_results = [parent_map[pid] for pid in parent_ids if pid in parent_map]
+
+        # Format the retrieved parent contexts into a single string for Gemini
+        context_string = "\n\n".join([f"[{row[0]}]\n{row[1]}" for row in ordered_results])
 
         # Step 3: Orchestrate Gemma 4 to extract structured action items
         system_prompt = """
@@ -201,7 +261,7 @@ async def extract_action_items(payload: ExtractionQuery):
 
         return {
             "status": "success",
-            "context_retrieved": len(results),
+            "context_retrieved": len(ordered_results),
             "action_items": action_items,
         }
 

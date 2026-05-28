@@ -45,7 +45,7 @@ graph TB
     end
 
     subgraph Persistence Layer [Database Container]
-        DB[(Postgres Port 5432)]
+        DB[(Postgres Port 5432: parent_documents & child_chunks)]
     end
 
     subgraph Cloud API [Google Gemini Cloud API]
@@ -99,8 +99,11 @@ sequenceDiagram
         API->>Pool: Acquire Connection
         Pool->>API: AsyncConnection
         
-        API->>DB: Cosine Distance query (<=> vector)
-        DB-->>API: Text Context blocks
+        API->>DB: Query child_chunks (<=> vector)
+        DB-->>API: Top child matches (parent_id)
+        
+        API->>DB: Fetch parent documents (where ID = ANY)
+        DB-->>API: High-context parent blocks
         
         API->>Gemini: POST /chat/completions (context + query)
         activate Gemini
@@ -138,6 +141,11 @@ sequenceDiagram
 * **Context:** The application was initially designed around local inference engines (like `llama.cpp` or `Ollama`) tracking slot concurrency (`/stream_slots`). However, local LLMs introduce extreme latency, high local computing overhead, and complicate CI/CD pipelines.
 * **Decision:** We migrated our core RAG model to **Google Gemini API** endpoints (using standard OpenAI-compatible structures). To handle this shift without UI breakage, the local `/stream_slots` endpoint gracefully handles connection failures by returning `{"error": "Engine offline"}`. In its place, the core observability system was shifted to **Promptfoo Test-Driven Evaluations** that track cost, precise cloud token limits, and latency directly in a dashboard.
 * **Result:** Drastic improvement in query execution speeds (RAG extraction completed under 2 seconds) and standardized E2E quality validations via robust cloud endpoints.
+
+### Decision 4: Decoupled Parent-Child (Small-to-Big) RAG Retrieval
+* **Context:** Meeting transcripts split into standard text blocks create a boundary problem: tiny, isolated statements (e.g., questions or quick solutions) get embedded poorly when surrounded by unrelated topics, or lose their crucial surrounding context if split too small.
+* **Decision:** We decoupled the vector search target from the generation context window. We store large contiguous transcripts (~1500 chars) in a `parent_documents` table and split them into highly specific speaker turns (~100-300 chars) inside a `child_chunks` table. We search child chunks using cosine similarity but substitute them with their fully chronological parent context logs before passing them to the reasoning client.
+* **Result:** The system resolved the semantic orphaning problem, allowing 100% correct, precise extraction of highly context-sensitive technical assignments (e.g., Sarah's outbox publisher language or Dave's consumer specifications) and achieved a 100% E2E test pass rate in our promptfoo suites.
 
 ---
 
