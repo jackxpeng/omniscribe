@@ -34,12 +34,14 @@ async def lifespan(app: FastAPI):
         async with app.state.db_pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                # Migrate vector dimensions: drop old 768 table and create 3072 table
+                await cur.execute("DROP TABLE IF EXISTS meeting_memory;")
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS meeting_memory (
                         id SERIAL PRIMARY KEY,
                         topic VARCHAR(255),
                         content TEXT,
-                        embedding VECTOR(768)
+                        embedding VECTOR(3072)
                     );
                 """)
                 await cur.execute("""
@@ -82,7 +84,7 @@ async def get_embedding(text: str) -> list[float]:
     """Calls Gemini embeddings API to convert text to a vector."""
     response = await embedding_client.embeddings.create(
         input=text,
-        model="text-embedding-004",
+        model="gemini-embedding-001",
     )
     return response.data[0].embedding
 

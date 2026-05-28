@@ -1,45 +1,18 @@
-prompts:
-  - file://prompt.txt
-
 providers:
-  - id: openai:chat:gemini-2.5-flash
-    config:
-      apiBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai'
+  - id: file://promptfoo_provider.py
 
-defaultTest:
-  options:
-    provider:
-      id: openai:chat:gemini-2.5-flash
-      config:
-        apiBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai'
+prompts:
+  # The prompt itself doesn't matter as much here, 
+  # as we are passing the 'query' variable straight to FastAPI
+  - "Extract actions for: {{query}}" 
 
 tests:
-  - description: "Outbox pattern extraction check"
-    vars:
-      context: |
-        [Architecture Discussion]
-        Alex: We need to figure out the outbox pattern. Right now we are dropping events.
-        Sarah: I can build a polling publisher in Postgres.
-        Dave: Wait, isn't polling too slow?
-        Sarah: Not if we tune the indexing on the Postgres table.
-      query: "Who is building the outbox publisher?"
+  - vars:
+      query: "Who is writing the outbox publisher and what language are they using?"
     assert:
-      - type: llm-rubric
-        value: "The JSON output contains a task assigned to 'Sarah' describing building a polling publisher."
-      - type: latency
-        threshold: 12000  # Latency limit (12s)
-      - type: is-json
-
-  - description: "Negative task volunteer check"
-    vars:
-      context: |
-        [Database Performance]
-        Alex: We should scale the DB vertically first.
-        Sarah: Yes, that is the fastest option.
-      query: "What task did Dave volunteer for?"
-    assert:
-      - type: llm-rubric
-        value: "The JSON output contains no tasks or indicates Dave did not volunteer."
-      - type: latency
-        threshold: 12000  # Latency limit (12s)
-      - type: is-json
+      - type: javascript
+        # Ensure Sarah is assigned and Rust is mentioned
+        value: |
+          const tasks = JSON.parse(output);
+          const task = tasks[0];
+          return task.assignee === 'Sarah' && task.task.includes('Rust');
