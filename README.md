@@ -11,7 +11,7 @@ Furthermore, OmniScribe integrates a comprehensive **Test-Driven Development (TD
 *   **Native Async Concurrency Stack:** Built using FastAPI and `psycopg` (Psycopg 3) in fully asynchronous mode. Reusable warm TCP database sockets are managed via `AsyncConnectionPool`, unblocking the ASGI event loop completely during heavy I/O operations.
 *   **Vector Search & Database Migration:** Utilizes the PostgreSQL `pgvector` extension. Our database is configured with high-fidelity `VECTOR(3072)` columns that map to Google's state-of-the-art `gemini-embedding-001` model.
 *   **Dual-Layered TDD Evaluations:** Combines isolated prompt validation with full End-to-End (E2E) Integration Testing. Promptfoo uses a custom Python provider (`promptfoo_provider.py`) to verify the entire RAG retrieval and completing pipeline.
-*   **Real-time Slot Observability:** Features a background server-sent events (SSE) stream (`/stream_slots`) that dynamically polls and visualizes local LLM slot VRAM telemetry and token decoding progress.
+*   **Real-time Slot Observability:** Features a background server-sent events (SSE) stream (`/stream_slots`) that dynamically polls and visualizes local LLM slot VRAM telemetry and token decoding progress. *(Note: Gracefully defaults to "Engine offline" in cloud-only mode, shifting performance matrix/visual tracing to promptfoo).*
 
 ---
 
@@ -109,3 +109,22 @@ To visually inspect prompts, trace exact input/output tokens, and review why a s
 npx promptfoo@latest view
 ```
 Open `http://localhost:15500` to browse promptfoo's built-in **Observability UI Dashboard**.
+
+---
+
+## 🎛️ Local vs. Cloud Observability Shift
+
+Because OmniScribe supports both **local-first** execution (via a local model engine like `llama.cpp` or `Ollama`) and **cloud-native** pipelines (using the Google Gemini API), the observability tools adapt dynamically to your current execution mode:
+
+### 1. Local-First Mode (VRAM & Slot Telemetry)
+*   **Active Server:** Requires running a local llama.cpp/Ollama server at `http://localhost:11434`.
+*   **Behavior:** The FastAPI server spins up a background generator `fetch_slot_data` that continuously polls local engine VRAM allocation and decoding speeds, streaming them via SSE (`/stream_slots`) to the frontend's real-time telemetry card.
+
+### 2. Cloud-Native Mode (Cloud API & Promptfoo Matrices)
+*   **Active Server:** Using `gemini-2.5-flash` and `gemini-embedding-001` via API keys in your `.env`.
+*   **Behavior:** Since cloud endpoints don't expose local hardware telemetry, the `/stream_slots` endpoint gracefully yields an `Engine offline` status to the frontend.
+*   **New Observability Focus:** Visual tracing shifts entirely to **Promptfoo**. Running `npx promptfoo view` opens an interactive web UI that tracks and charts:
+    *   **Semantic Quality:** LLM-as-a-judge grading outputs against facts.
+    *   **Cost & Scale:** Actual input/output token counts and calculated API execution costs.
+    *   **Latency Profile:** Time-to-first-byte and total roundtrip response times per query.
+
