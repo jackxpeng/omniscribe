@@ -8,5 +8,5 @@ dependencies = [
     "fastapi[all]>=0.136.3",
     "openai>=2.38.0",
     "pgvector>=0.4.2",
-    "psycopg2-binary>=2.9.12",
+    "psycopg[binary,pool]>=3.1.18",
 ]

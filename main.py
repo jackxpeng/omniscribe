@@ -1,54 +1,63 @@
 import json
+from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 import httpx
 import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from openai import OpenAI
-import psycopg2
-from pgvector.psycopg2 import register_vector
+from openai import AsyncOpenAI
+import psycopg
+from psycopg_pool import AsyncConnectionPool
+from pgvector.psycopg import register_vector_async
 
 
 from utils import parse_transcript_to_turns, chunk_by_speaker
 
-app = FastAPI(title="OmniScribe Process Manager")
+db_conninfo = "dbname=postgres user=postgres password=postgres host=localhost port=5432"
+
+async def configure_conn(conn: psycopg.AsyncConnection):
+    await register_vector_async(conn)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize the asynchronous connection pool
+    app.state.db_pool = AsyncConnectionPool(conninfo=db_conninfo, open=False, configure=configure_conn)
+    await app.state.db_pool.open()
+    
+    # Initialize database schemas
+    try:
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS meeting_memory (
+                        id SERIAL PRIMARY KEY,
+                        topic VARCHAR(255),
+                        content TEXT,
+                        embedding VECTOR(768)
+                    );
+                """)
+            print("Database initialized successfully.")
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
+        
+    yield
+    
+    # Clean shutdown of connection pool
+    await app.state.db_pool.close()
+
+app = FastAPI(title="OmniScribe Process Manager", lifespan=lifespan)
 
 # 1. Initialize the Local Embedding Client (Pointing to Nomic on Port 11435)
-embedding_client = OpenAI(
+embedding_client = AsyncOpenAI(
     base_url="http://localhost:11435/v1",
     api_key="sk-no-key-required",  # Local servers don't need real keys
 )
 
-reasoning_client = OpenAI(
+reasoning_client = AsyncOpenAI(
     base_url="http://localhost:11434/v1", api_key="sk-no-key-required"
 )
-
-# Initialize the schema
-try:
-    # Connect to the local pgvector container
-    conn = psycopg2.connect(
-        dbname="postgres",
-        user="postgres",
-        password="postgres",
-        host="localhost",
-        port="5432",
-    )
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        # 3072 dimensions is the standard output for large embedding models
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS meeting_memory (
-                id SERIAL PRIMARY KEY,
-                topic VARCHAR(255),
-                content TEXT,
-                embedding VECTOR(768)
-            );
-        """)
-        register_vector(conn)
-except Exception as e:
-    print(f"Database connection failed: {e}")
 
 
 class TranscriptPayload(BaseModel):
@@ -56,9 +65,9 @@ class TranscriptPayload(BaseModel):
     transcript: str
 
 
-def get_embedding(text: str) -> list[float]:
+async def get_embedding(text: str) -> list[float]:
     """Calls our local Nomic microservice to convert text to a vector."""
-    response = embedding_client.embeddings.create(
+    response = await embedding_client.embeddings.create(
         input=text,
         model="nomic-embed-text",  # Name doesn't matter for llama.cpp, but required by the API schema
     )
@@ -66,7 +75,7 @@ def get_embedding(text: str) -> list[float]:
 
 
 @app.post("/ingest")
-def ingest_transcript(payload: TranscriptPayload):
+async def ingest_transcript(payload: TranscriptPayload):
     try:
         # Step 1: Semantic Chunking
         turns = parse_transcript_to_turns(payload.transcript)
@@ -78,16 +87,17 @@ def ingest_transcript(payload: TranscriptPayload):
             )
 
         # Step 2 & 3: Generate Vectors and Insert to DB
-        with conn.cursor() as cur:
-            for chunk in chunks:
-                # Ask Port 11435 for the vector
-                vector = get_embedding(chunk)
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for chunk in chunks:
+                    # Ask Port 11435 for the vector
+                    vector = await get_embedding(chunk)
 
-                # Save the text and the vector together
-                cur.execute(
-                    "INSERT INTO meeting_memory (topic, content, embedding) VALUES (%s, %s, %s)",
-                    (payload.topic, chunk, vector),
-                )
+                    # Save the text and the vector together
+                    await cur.execute(
+                        "INSERT INTO meeting_memory (topic, content, embedding) VALUES (%s, %s, %s)",
+                        (payload.topic, chunk, vector),
+                    )
 
         return {
             "status": "success",
@@ -105,24 +115,25 @@ class ExtractionQuery(BaseModel):
 
 
 @app.post("/extract_actions")
-def extract_action_items(payload: ExtractionQuery):
+async def extract_action_items(payload: ExtractionQuery):
     try:
         # Step 1: Embed the search query using Nomic
-        query_vector = get_embedding(payload.query)
+        query_vector = await get_embedding(payload.query)
 
         # Step 2: Retrieve the closest context from PostgreSQL
         # The <=> operator calculates Cosine Distance in pgvector
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT topic, content 
-                FROM meeting_memory 
-                ORDER BY embedding <=> %s::vector 
-                LIMIT %s
-            """,
-                (query_vector, payload.limit),
-            )
-            results = cur.fetchall()
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT topic, content 
+                    FROM meeting_memory 
+                    ORDER BY embedding <=> %s::vector 
+                    LIMIT %s
+                """,
+                    (query_vector, payload.limit),
+                )
+                results = await cur.fetchall()
 
         if not results:
             return {
@@ -145,7 +156,7 @@ def extract_action_items(payload: ExtractionQuery):
         - "status": Always set this to "PENDING".
         """
 
-        response = reasoning_client.chat.completions.create(
+        response = await reasoning_client.chat.completions.create(
             model="gemma-4",  # Name ignored by llama.cpp
             messages=[
                 {"role": "system", "content": system_prompt},
