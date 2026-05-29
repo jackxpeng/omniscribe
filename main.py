@@ -13,6 +13,15 @@ from pgvector.psycopg import register_vector_async
 import os
 from dotenv import load_dotenv
 
+# Initialize Arize Phoenix OpenTelemetry LLM tracing
+from phoenix.otel import register
+from openinference.instrumentation.openai import OpenAIInstrumentor
+from opentelemetry import trace
+
+tracer_provider = register(project_name="omniscribe")
+OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+tracer = trace.get_tracer("omniscribe")
+
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -25,6 +34,13 @@ async def configure_conn(conn: psycopg.AsyncConnection):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Launch local Arize Phoenix trace collector server
+    import phoenix as px
+    try:
+        px.launch_app(port=6006)
+    except Exception as e:
+        print(f"Failed to launch Arize Phoenix: {e}")
+
     # Initialize the asynchronous connection pool
     app.state.db_pool = AsyncConnectionPool(conninfo=db_conninfo, open=False, configure=configure_conn)
     await app.state.db_pool.open()
@@ -155,42 +171,49 @@ async def extract_action_items(payload: ExtractionQuery):
         query_vector = await get_embedding(payload.query)
 
         # Step 2: Retrieve the closest child chunks from child_chunks table (high precision)
-        async with app.state.db_pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT parent_id 
-                    FROM child_chunks 
-                    ORDER BY embedding <=> %s::vector 
-                    LIMIT %s
-                """,
-                    (query_vector, max(payload.limit, 5)),  # Get top 5 child chunks to ensure rich context
-                )
-                child_results = await cur.fetchall()
+        with tracer.start_as_current_span("postgresql_vector_search") as span:
+            span.set_attribute("search.query", payload.query)
+            span.set_attribute("search.limit", payload.limit)
+            
+            async with app.state.db_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        SELECT parent_id 
+                        FROM child_chunks 
+                        ORDER BY embedding <=> %s::vector 
+                        LIMIT %s
+                    """,
+                        (query_vector, max(payload.limit, 5)),  # Get top 5 child chunks to ensure rich context
+                    )
+                    child_results = await cur.fetchall()
 
-                if not child_results:
-                    return {
-                        "status": "empty",
-                        "message": "No relevant context found in memory.",
-                    }
+                    if not child_results:
+                        span.set_attribute("search.status", "empty")
+                        return {
+                            "status": "empty",
+                            "message": "No relevant context found in memory.",
+                        }
 
-                # Step 3: Resolve unique parent IDs using stable insertion-ordered deduplication
-                parent_ids = list(dict.fromkeys(parent_id for (parent_id,) in child_results))
+                    # Step 3: Resolve unique parent IDs using stable insertion-ordered deduplication
+                    parent_ids = list(dict.fromkeys(parent_id for (parent_id,) in child_results))
+                    span.set_attribute("search.matched_parent_count", len(parent_ids))
 
-                # Step 4: Fetch complete parent documents (substitution/Small-to-Big expansion)
-                await cur.execute(
-                    """
-                    SELECT id, topic, content 
-                    FROM parent_documents 
-                    WHERE id = ANY(%s)
-                """,
-                    (parent_ids,),
-                )
-                parent_results = await cur.fetchall()
+                    # Step 4: Fetch complete parent documents (substitution/Small-to-Big expansion)
+                    await cur.execute(
+                        """
+                        SELECT id, topic, content 
+                        FROM parent_documents 
+                        WHERE id = ANY(%s)
+                    """,
+                        (parent_ids,),
+                    )
+                    parent_results = await cur.fetchall()
 
-                # Step 5: Preserve the original relevance order of parent documents
-                parent_map = {row[0]: (row[1], row[2]) for row in parent_results}
-                ordered_results = [parent_map[pid] for pid in parent_ids if pid in parent_map]
+                    # Step 5: Preserve the original relevance order of parent documents
+                    parent_map = {row[0]: (row[1], row[2]) for row in parent_results}
+                    ordered_results = [parent_map[pid] for pid in parent_ids if pid in parent_map]
+                    span.set_attribute("search.status", "success")
 
         # Format the retrieved parent contexts into a single string for Gemini
         context_string = "\n\n".join([f"[{row[0]}]\n{row[1]}" for row in ordered_results])
