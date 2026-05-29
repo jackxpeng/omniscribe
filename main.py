@@ -174,11 +174,8 @@ async def extract_action_items(payload: ExtractionQuery):
                         "message": "No relevant context found in memory.",
                     }
 
-                # Step 3: Resolve unique parent IDs (maintaining chronological/relevance order)
-                parent_ids = []
-                for (parent_id,) in child_results:
-                    if parent_id not in parent_ids:
-                        parent_ids.append(parent_id)
+                # Step 3: Resolve unique parent IDs using stable insertion-ordered deduplication
+                parent_ids = list(dict.fromkeys(parent_id for (parent_id,) in child_results))
 
                 # Step 4: Fetch complete parent documents (substitution/Small-to-Big expansion)
                 await cur.execute(
