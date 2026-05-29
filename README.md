@@ -120,11 +120,13 @@ Because OmniScribe supports both **local-first** execution (via a local model en
 *   **Active Server:** Requires running a local llama.cpp/Ollama server at `http://localhost:11434`.
 *   **Behavior:** The FastAPI server spins up a background generator `fetch_slot_data` that continuously polls local engine VRAM allocation and decoding speeds, streaming them via SSE (`/stream_slots`) to the frontend's real-time telemetry card.
 
-### 2. Cloud-Native Mode (Cloud API & Promptfoo Matrices)
+### 2. Cloud-Native Mode (Cloud API & Phoenix/Promptfoo Observability)
 *   **Active Server:** Using `gemini-2.5-flash` and `gemini-embedding-001` via API keys in your `.env`.
 *   **Behavior:** Since cloud endpoints don't expose local hardware telemetry, the `/stream_slots` endpoint gracefully yields an `Engine offline` status to the frontend.
-*   **New Observability Focus:** Visual tracing shifts entirely to **Promptfoo**. Running `npx promptfoo view` opens an interactive web UI that tracks and charts:
-    *   **Semantic Quality:** LLM-as-a-judge grading outputs against facts.
-    *   **Cost & Scale:** Actual input/output token counts and calculated API execution costs.
-    *   **Latency Profile:** Time-to-first-byte and total roundtrip response times per query.
+*   **New Observability Focus:** Visual tracing and runtime performance tracking shift entirely to **Arize Phoenix** and **Promptfoo**:
+    *   **Arize Phoenix (Port 6006):** Runs a local trace collector automatically when you start the FastAPI server. Phoenix traces the entire RAG pipeline hierarchy in real-time, visualizing exact execution latencies and nested spans:
+        1. `postgresql_vector_search` (Custom OTel Span tracking database similarity search times)
+        2. `gemini-embedding-001` (Auto-instrumented OpenAI embedding call)
+        3. `gemini-2.5-flash` (Auto-instrumented OpenAI chat completion call capturing raw inputs, tokens, and temperature)
+    *   **Promptfoo (Port 15500):** Visualizes the offline evaluation matrix and charts semantic quality (LLM-as-a-judge scoring rubrics) across the Golden Dataset.
 
